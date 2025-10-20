@@ -130,8 +130,8 @@ def run_analysis(displacements, pressures, method, elastic_points, plastic_point
     
     return results
 
-def create_free_cursor_chart(displacements, pressures, results, method):
-    """Create Altair chart with true free cursor movement - NO AUTO-SNAP!"""
+def create_tes_interception_chart(displacements, pressures, results):
+    """Create specialized chart for TES method showing TES line and data intersection"""
     
     # Create dense data for smooth cursor movement
     D_max = max(displacements)
@@ -145,7 +145,8 @@ def create_free_cursor_chart(displacements, pressures, results, method):
     exp_df = pd.DataFrame({
         'Displacement': dense_displacements,
         'Pressure': exp_pressures,
-        'Series': 'Experimental Data'
+        'Series': 'Experimental Data',
+        'Line_Type': 'Curve'
     })
     chart_data.append(exp_df)
     
@@ -154,42 +155,42 @@ def create_free_cursor_chart(displacements, pressures, results, method):
     elastic_df = pd.DataFrame({
         'Displacement': dense_displacements,
         'Pressure': elastic_pressures,
-        'Series': 'Elastic Slope'
+        'Series': 'Elastic Slope',
+        'Line_Type': 'Reference'
     })
     chart_data.append(elastic_df)
     
-    if method == "TES":
-        # TES line
-        tes_pressures = 0.5 * results["S_Elastic"] * dense_displacements
-        tes_df = pd.DataFrame({
-            'Displacement': dense_displacements,
-            'Pressure': tes_pressures,
-            'Series': 'TES Line (0.5 × Elastic Slope)'
-        })
-        chart_data.append(tes_df)
-        
-    elif method == "TI" and results.get("S_Plastic") is not None:
-        # Plastic tangent
-        plastic_pressures = results["S_Plastic"] * dense_displacements + results["C_Plastic"]
-        plastic_df = pd.DataFrame({
-            'Displacement': dense_displacements,
-            'Pressure': plastic_pressures,
-            'Series': 'Plastic Tangent'
-        })
-        chart_data.append(plastic_df)
+    # TES line (RED LINE - this is the important one)
+    tes_pressures = 0.5 * results["S_Elastic"] * dense_displacements
+    tes_df = pd.DataFrame({
+        'Displacement': dense_displacements,
+        'Pressure': tes_pressures,
+        'Series': 'TES Line (0.5 × Elastic Slope)',
+        'Line_Type': 'TES'
+    })
+    chart_data.append(tes_df)
     
     # Combine all data
     combined_data = pd.concat(chart_data, ignore_index=True)
     
-    # Create the interactive chart
+    # Create the main chart with TES line highlighted
     line_chart = alt.Chart(combined_data).mark_line().encode(
         x=alt.X('Displacement:Q', title='Displacement', scale=alt.Scale(zero=False)),
         y=alt.Y('Pressure:Q', title='Pressure', scale=alt.Scale(zero=False)),
-        color=alt.Color('Series:N', legend=alt.Legend(title="Lines")),
+        color=alt.Color('Series:N', legend=alt.Legend(title="Lines"),
+                       scale=alt.Scale(
+                           domain=['Experimental Data', 'Elastic Slope', 'TES Line (0.5 × Elastic Slope)'],
+                           range=['blue', 'green', 'red']
+                       )),
+        strokeWidth=alt.condition(
+            alt.datum.Series == 'TES Line (0.5 × Elastic Slope)',
+            alt.value(3),  # Thicker line for TES
+            alt.value(2)   # Normal thickness for others
+        ),
         strokeDash=alt.condition(
             alt.datum.Series == 'Experimental Data',
             alt.value([0]),  # solid for experimental
-            alt.value([5, 5])  # dashed for others
+            alt.value([5, 5])  # dashed for reference lines
         ),
         tooltip=[
             alt.Tooltip('Series:N', title='Line'),
@@ -199,7 +200,7 @@ def create_free_cursor_chart(displacements, pressures, results, method):
     ).properties(
         width=800,
         height=500,
-        title=f"Limit Load Analysis - {method} Method - Move cursor freely over lines!"
+        title="TES Method - Intersection of TES Line (Red) with Experimental Data"
     ).interactive()
     
     # Add original data points as circles
@@ -222,28 +223,163 @@ def create_free_cursor_chart(displacements, pressures, results, method):
         ]
     )
     
-    # Add limit load point if found
+    # Add TES intersection point if found
     if results.get("is_found"):
-        limit_data = pd.DataFrame({
+        intersection_data = pd.DataFrame({
             'Displacement': [results["D_Limit"]],
             'Pressure': [results["P_Limit"]],
-            'Series': ['Limit Load Point']
+            'Series': ['TES Intersection Point'],
+            'Description': [f'TES Intersection: D={results["D_Limit"]:.4f}, P={results["P_Limit"]:.4f}']
         })
         
-        limit_points = alt.Chart(limit_data).mark_point(
-            size=200,
+        # Highlight the intersection point
+        intersection_point = alt.Chart(intersection_data).mark_point(
+            size=300,
             color='red',
-            shape='diamond'
+            shape='diamond',
+            filled=True,
+            opacity=1.0
         ).encode(
             x='Displacement:Q',
             y='Pressure:Q',
             tooltip=[
-                alt.Tooltip('Displacement:Q', title='Limit Displacement', format='.4f'),
-                alt.Tooltip('Pressure:Q', title='Limit Pressure', format='.4f')
+                alt.Tooltip('Description:N', title='Intersection')
             ]
         )
         
-        final_chart = line_chart + points + limit_points
+        # Add vertical and horizontal lines to highlight intersection
+        v_line = alt.Chart(intersection_data).mark_rule(
+            color='red',
+            strokeDash=[5, 5],
+            opacity=0.6
+        ).encode(
+            x='Displacement:Q',
+            tooltip=[alt.Tooltip('Displacement:Q', title='Intersection D', format='.4f')]
+        )
+        
+        h_line = alt.Chart(intersection_data).mark_rule(
+            color='red',
+            strokeDash=[5, 5],
+            opacity=0.6
+        ).encode(
+            y='Pressure:Q',
+            tooltip=[alt.Tooltip('Pressure:Q', title='Intersection P', format='.4f')]
+        )
+        
+        final_chart = line_chart + points + intersection_point + v_line + h_line
+        
+    else:
+        final_chart = line_chart + points
+    
+    return final_chart
+
+def create_ti_interception_chart(displacements, pressures, results):
+    """Create specialized chart for TI method showing elastic and plastic intersection"""
+    
+    # Create dense data for smooth cursor movement
+    D_max = max(displacements)
+    dense_displacements = np.linspace(0, D_max, 500)
+    
+    # Create data for all lines
+    chart_data = []
+    
+    # Experimental data (interpolated for smoothness)
+    exp_pressures = np.interp(dense_displacements, displacements, pressures)
+    exp_df = pd.DataFrame({
+        'Displacement': dense_displacements,
+        'Pressure': exp_pressures,
+        'Series': 'Experimental Data',
+        'Line_Type': 'Curve'
+    })
+    chart_data.append(exp_df)
+    
+    # Elastic line
+    elastic_pressures = results["S_Elastic"] * dense_displacements
+    elastic_df = pd.DataFrame({
+        'Displacement': dense_displacements,
+        'Pressure': elastic_pressures,
+        'Series': 'Elastic Slope',
+        'Line_Type': 'Reference'
+    })
+    chart_data.append(elastic_df)
+    
+    # Plastic tangent
+    plastic_pressures = results["S_Plastic"] * dense_displacements + results["C_Plastic"]
+    plastic_df = pd.DataFrame({
+        'Displacement': dense_displacements,
+        'Pressure': plastic_pressures,
+        'Series': 'Plastic Tangent',
+        'Line_Type': 'Reference'
+    })
+    chart_data.append(plastic_df)
+    
+    # Combine all data
+    combined_data = pd.concat(chart_data, ignore_index=True)
+    
+    # Create the main chart
+    line_chart = alt.Chart(combined_data).mark_line().encode(
+        x=alt.X('Displacement:Q', title='Displacement', scale=alt.Scale(zero=False)),
+        y=alt.Y('Pressure:Q', title='Pressure', scale=alt.Scale(zero=False)),
+        color=alt.Color('Series:N', legend=alt.Legend(title="Lines")),
+        strokeDash=alt.condition(
+            alt.datum.Series == 'Experimental Data',
+            alt.value([0]),  # solid for experimental
+            alt.value([5, 5])  # dashed for reference lines
+        ),
+        tooltip=[
+            alt.Tooltip('Series:N', title='Line'),
+            alt.Tooltip('Displacement:Q', title='Displacement', format='.4f'),
+            alt.Tooltip('Pressure:Q', title='Pressure', format='.4f')
+        ]
+    ).properties(
+        width=800,
+        height=500,
+        title="TI Method - Intersection of Elastic and Plastic Tangents"
+    ).interactive()
+    
+    # Add original data points as circles
+    points_data = pd.DataFrame({
+        'Displacement': displacements,
+        'Pressure': pressures,
+        'Series': 'Data Points'
+    })
+    
+    points = alt.Chart(points_data).mark_circle(
+        size=60,
+        color='blue',
+        opacity=0.6
+    ).encode(
+        x='Displacement:Q',
+        y='Pressure:Q',
+        tooltip=[
+            alt.Tooltip('Displacement:Q', title='Displacement', format='.4f'),
+            alt.Tooltip('Pressure:Q', title='Pressure', format='.4f')
+        ]
+    )
+    
+    # Add intersection point if found
+    if results.get("is_found"):
+        intersection_data = pd.DataFrame({
+            'Displacement': [results["D_Limit"]],
+            'Pressure': [results["P_Limit"]],
+            'Series': ['Tangent Intersection Point'],
+            'Description': [f'TI Intersection: D={results["D_Limit"]:.4f}, P={results["P_Limit"]:.4f}']
+        })
+        
+        intersection_point = alt.Chart(intersection_data).mark_point(
+            size=300,
+            color='orange',
+            shape='diamond',
+            filled=True
+        ).encode(
+            x='Displacement:Q',
+            y='Pressure:Q',
+            tooltip=[
+                alt.Tooltip('Description:N', title='Intersection')
+            ]
+        )
+        
+        final_chart = line_chart + points + intersection_point
     else:
         final_chart = line_chart + points
     
@@ -254,14 +390,14 @@ def main():
     st.title("🔬 Limit Load Analyzer")
     st.markdown("**TES (Twice Elastic Slope) & TI (Tangent Intersection) Methods**")
     
-    # Instructions for true free cursor movement
+    # Instructions
     st.success("""
     **🎯 TRUE FREE CURSOR MOVEMENT!**
     - **Move your mouse cursor** over ANY part of the lines
     - **See exact coordinates** in real-time as you move
     - **NO AUTO-SNAPPING** - continuous cursor tracking
-    - **Hover over lines** to see displacement and pressure values
-    - **Click and drag** to zoom, **double-click** to reset
+    - **TES Method**: Shows intersection between TES line (red) and experimental data
+    - **TI Method**: Shows intersection between elastic and plastic tangents
     """)
     
     # Sidebar for inputs
@@ -346,26 +482,37 @@ def main():
                     st.metric("Limit Pressure", "Not Found")
                     st.metric("Status", "❌")
             
-            # Plot with TRUE FREE CURSOR movement
-            st.subheader("📊 Interactive Plot - Move Cursor Freely!")
+            # Plot with specialized interception display
+            st.subheader("📊 Interactive Plot - TES Line Intersection")
             st.markdown("""
-            **🖱️ How to use the free cursor:**
-            - **Simply move your mouse** over any line
-            - **See coordinates instantly** in the tooltip
-            - **No snapping** - cursor moves continuously
-            - **Hover over data points** (blue circles) for original values
-            - **Zoom and pan** as needed
+            **🖱️ TES Method Features:**
+            - **Red TES Line**: 0.5 × Elastic Slope
+            - **Red Diamond**: Intersection point between TES line and experimental data
+            - **Dashed lines**: Help visualize the intersection coordinates
+            - **Move cursor freely** over any line to see coordinates
             """)
             
             try:
-                chart = create_free_cursor_chart(displacements, pressures, results, method)
+                if method == "TES":
+                    chart = create_tes_interception_chart(displacements, pressures, results)
+                else:
+                    chart = create_ti_interception_chart(displacements, pressures, results)
+                
                 st.altair_chart(chart, use_container_width=True)
+                
             except Exception as e:
                 st.error(f"Error creating interactive chart: {e}")
                 st.info("Please make sure Altair is installed: `pip install altair`")
             
-            if results.get("is_found"):
-                st.success(f"🎯 Auto Limit Load Found at P = {results['P_Limit']:.4f}, D = {results['D_Limit']:.4f}")
+            # Highlight the TES intersection specifically
+            if method == "TES" and results.get("is_found"):
+                st.success(f"🎯 **TES Intersection Found!**")
+                st.info(f"""
+                **TES Line (Red) intersects Experimental Data at:**
+                - **Displacement**: {results['D_Limit']:.4f}
+                - **Pressure**: {results['P_Limit']:.4f}
+                - **TES Slope**: {results.get('S_TES', 0):.4f} (0.5 × Elastic Slope)
+                """)
             
             # Detailed results
             st.subheader("🔍 Detailed Results")
@@ -383,11 +530,11 @@ def main():
                     st.write(f"- TES Slope: {results.get('S_TES', 0):.6f}")
                     st.write(f"- TES line equation: P = {results.get('S_TES', 0):.4f} × D")
                     if results.get("is_found"):
-                        st.success("✅ Limit load successfully determined")
-                        st.write(f"- Limit Pressure: {results['P_Limit']:.6f}")
-                        st.write(f"- Limit Displacement: {results['D_Limit']:.6f}")
+                        st.success("✅ TES intersection successfully determined")
+                        st.write(f"- Intersection Pressure: {results['P_Limit']:.6f}")
+                        st.write(f"- Intersection Displacement: {results['D_Limit']:.6f}")
                     else:
-                        st.error("❌ Limit load not found with current parameters")
+                        st.error("❌ TES intersection not found with current parameters")
                         
                 elif method == "TI":
                     st.write("**TI Method Results:**")
@@ -395,45 +542,11 @@ def main():
                     st.write(f"- Plastic Intercept: {results.get('C_Plastic', 0):.6f}")
                     st.write(f"- Plastic line equation: P = {results.get('S_Plastic', 0):.4f} × D + {results.get('C_Plastic', 0):.4f}")
                     if results.get("is_found"):
-                        st.success("✅ Limit load successfully determined")
-                        st.write(f"- Limit Pressure: {results['P_Limit']:.6f}")
-                        st.write(f"- Limit Displacement: {results['D_Limit']:.6f}")
+                        st.success("✅ Tangent intersection successfully determined")
+                        st.write(f"- Intersection Pressure: {results['P_Limit']:.6f}")
+                        st.write(f"- Intersection Displacement: {results['D_Limit']:.6f}")
                     else:
-                        st.error("❌ Limit load not found with current parameters")
-            
-            # Download results
-            with st.expander("💾 Download Results"):
-                results_text = f"""Limit Load Analysis Results - {method} Method
-                
-Elastic Slope (S_Elastic): {results['S_Elastic']:.6f}
-Points used for elastic slope: {min(elastic_points, len(displacements) - 1)}
-
-"""
-                if method == "TES":
-                    results_text += f"""TES Slope: {results.get('S_TES', 0):.6f}
-TES Line Equation: P = {results.get('S_TES', 0):.4f} × D
-"""
-                elif method == "TI":
-                    results_text += f"""Plastic Slope: {results.get('S_Plastic', 0):.6f}
-Plastic Intercept: {results.get('C_Plastic', 0):.6f}
-Plastic Line Equation: P = {results.get('S_Plastic', 0):.4f} × D + {results.get('C_Plastic', 0):.4f}
-"""
-                
-                if results.get("is_found"):
-                    results_text += f"""
-LIMIT LOAD RESULTS:
-Limit Pressure: {results['P_Limit']:.6f}
-Limit Displacement: {results['D_Limit']:.6f}
-"""
-                else:
-                    results_text += "\nLimit load not found with current parameters."
-                
-                st.download_button(
-                    label="📥 Download Results as Text",
-                    data=results_text,
-                    file_name=f"limit_load_analysis_{method}.txt",
-                    mime="text/plain"
-                )
+                        st.error("❌ Tangent intersection not found with current parameters")
 
 if __name__ == "__main__":
     main()
