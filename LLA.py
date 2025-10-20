@@ -129,7 +129,37 @@ def run_analysis(displacements, pressures, method, elastic_points, plastic_point
     
     return results
 
-def create_interactive_plot(displacements, pressures, results, method):
+def find_manual_intersection(displacements, pressures, slope, intercept=0):
+    """Find intersection point for manual slope adjustment"""
+    P_Limit, D_Limit = None, None
+    is_found = False
+    
+    for i in range(1, len(displacements)):
+        P_actual = pressures[i]
+        D_actual = displacements[i]
+        P_on_line = slope * D_actual + intercept
+
+        if P_actual >= P_on_line:
+            # Interpolate intersection between point i-1 and i
+            P_prev = pressures[i - 1]
+            D_prev = displacements[i - 1]
+            
+            # Line 1 (Actual Curve segment): P = m_actual * D + c_actual
+            m_actual = (P_actual - P_prev) / (D_actual - D_prev) if (D_actual - D_prev) != 0 else 0
+            c_actual = P_actual - m_actual * D_actual
+
+            # Line 2 (Manual Line): P = slope * D + intercept
+            denominator = slope - m_actual
+            
+            if denominator != 0:
+                D_Limit = (c_actual - intercept) / denominator
+                P_Limit = slope * D_Limit + intercept
+                is_found = True
+            break
+    
+    return P_Limit, D_Limit, is_found
+
+def create_interactive_plot(displacements, pressures, results, method, manual_results=None):
     """Create enhanced visualization using Streamlit's native charts with tooltips"""
     
     # Create comprehensive data frame with all series
@@ -181,15 +211,36 @@ def create_interactive_plot(displacements, pressures, results, method):
         })
         plot_data.append(plastic_df)
     
-    # Add limit load point if found
+    # Add auto limit load point if found
     if results.get("is_found"):
-        limit_df = pd.DataFrame({
+        auto_limit_df = pd.DataFrame({
             'Displacement': [results["D_Limit"]],
             'Pressure': [results["P_Limit"]],
-            'Series': 'Limit Load Point',
+            'Series': 'Auto Limit Load Point',
             'Point_Type': 'Limit'
         })
-        plot_data.append(limit_df)
+        plot_data.append(auto_limit_df)
+    
+    # Add manual limit load point if exists
+    if manual_results and manual_results.get("is_found"):
+        manual_limit_df = pd.DataFrame({
+            'Displacement': [manual_results["D_Limit"]],
+            'Pressure': [manual_results["P_Limit"]],
+            'Series': 'Manual Limit Load Point',
+            'Point_Type': 'Manual'
+        })
+        plot_data.append(manual_limit_df)
+    
+    # Add manual line if exists
+    if manual_results and manual_results.get("manual_slope") is not None:
+        manual_pressures = manual_results["manual_slope"] * elastic_displacements + manual_results.get("manual_intercept", 0)
+        manual_line_df = pd.DataFrame({
+            'Displacement': elastic_displacements,
+            'Pressure': manual_pressures,
+            'Series': 'Manual Adjustment Line',
+            'Point_Type': 'Manual_Line'
+        })
+        plot_data.append(manual_line_df)
     
     # Combine all data
     combined_df = pd.concat(plot_data, ignore_index=True)
@@ -205,16 +256,16 @@ def create_interactive_plot(displacements, pressures, results, method):
     
     # Create the main chart with enhanced configuration
     chart = st.line_chart(
-        combined_df[combined_df['Point_Type'].isin(['Line', 'Data'])], 
+        combined_df[combined_df['Point_Type'].isin(['Line', 'Data', 'Manual_Line'])], 
         x='Displacement', 
         y='Pressure', 
         color='Series',
         height=500
     )
     
-    # Add limit point as a separate scatter plot if found
-    if results.get("is_found"):
-        limit_points = combined_df[combined_df['Point_Type'] == 'Limit']
+    # Add limit points as separate scatter plots
+    limit_points = combined_df[combined_df['Point_Type'].isin(['Limit', 'Manual'])]
+    if not limit_points.empty:
         st.scatter_chart(
             limit_points,
             x='Displacement',
@@ -222,50 +273,69 @@ def create_interactive_plot(displacements, pressures, results, method):
             color='Series',
             size=100
         )
+
+def manual_interception_interface(displacements, pressures, method, elastic_slope):
+    """Interface for manual interception adjustment"""
+    st.subheader("🎯 Manual Interception Adjustment")
     
-    # Create a detailed data table for coordinate reference
-    with st.expander("📋 Click to View Detailed Data Table with Coordinates"):
-        st.markdown("**Full Dataset with Coordinates:**")
-        detailed_df = pd.DataFrame({
-            'Point': range(len(displacements)),
-            'Displacement': displacements,
-            'Pressure': pressures
-        })
-        st.dataframe(detailed_df, use_container_width=True)
-        
-        # Show key intersection points
-        st.markdown("**Key Analysis Points:**")
-        key_points_data = []
-        
-        # Elastic line info
-        key_points_data.append({
-            'Point Type': 'Elastic Slope Reference',
-            'Slope': f"{results['S_Elastic']:.4f}",
-            'Equation': f"P = {results['S_Elastic']:.4f} × D"
-        })
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Auto-calculated Values:**")
+        st.write(f"- Elastic Slope: {elastic_slope:.6f}")
+        if method == "TES":
+            st.write(f"- TES Slope: {0.5 * elastic_slope:.6f}")
+    
+    with col2:
+        st.write("**Manual Adjustment:**")
         
         if method == "TES":
-            key_points_data.append({
-                'Point Type': 'TES Line Reference', 
-                'Slope': f"{results.get('S_TES', 0):.4f}",
-                'Equation': f"P = {results.get('S_TES', 0):.4f} × D"
-            })
-        elif method == "TI" and results.get("S_Plastic") is not None:
-            key_points_data.append({
-                'Point Type': 'Plastic Tangent Reference',
-                'Slope': f"{results.get('S_Plastic', 0):.4f}",
-                'Equation': f"P = {results.get('S_Plastic', 0):.4f} × D + {results.get('C_Plastic', 0):.4f}"
-            })
+            default_slope = 0.5 * elastic_slope
+            slope_label = "TES Slope"
+        else:  # TI method
+            default_slope = elastic_slope
+            slope_label = "Reference Slope"
             
-        if results.get("is_found"):
-            key_points_data.append({
-                'Point Type': 'LIMIT LOAD POINT',
-                'Displacement': f"{results['D_Limit']:.6f}",
-                'Pressure': f"{results['P_Limit']:.6f}",
-                'Equation': 'Intersection Point'
-            })
+        manual_slope = st.number_input(
+            f"{slope_label} for Manual Search",
+            value=float(default_slope),
+            step=0.01,
+            format="%.6f",
+            help="Adjust this slope value to manually search for intersection"
+        )
         
-        st.table(pd.DataFrame(key_points_data))
+        manual_intercept = 0
+        if method == "TI":
+            manual_intercept = st.number_input(
+                "Intercept for Manual Search",
+                value=0.0,
+                step=0.01,
+                format="%.6f",
+                help="Adjust intercept for plastic tangent line"
+            )
+    
+    if st.button("🔍 Find Manual Intersection", type="secondary"):
+        P_manual, D_manual, found = find_manual_intersection(
+            displacements, pressures, manual_slope, manual_intercept
+        )
+        
+        if found:
+            st.success(f"✅ Manual Limit Load Found!")
+            st.write(f"- Manual Limit Pressure: {P_manual:.6f}")
+            st.write(f"- Manual Limit Displacement: {D_manual:.6f}")
+            
+            return {
+                "P_Limit": P_manual,
+                "D_Limit": D_manual,
+                "is_found": True,
+                "manual_slope": manual_slope,
+                "manual_intercept": manual_intercept
+            }
+        else:
+            st.error("❌ No intersection found with current manual parameters")
+            return None
+    
+    return None
 
 # --- Streamlit UI ---
 def main():
@@ -328,6 +398,10 @@ def main():
         st.error("❌ Error: Need at least 3 data points for analysis")
         return
     
+    # Initialize session state for manual results
+    if 'manual_results' not in st.session_state:
+        st.session_state.manual_results = None
+    
     # Run analysis when button is clicked
     if st.sidebar.button("🚀 Run Analysis", type="primary"):
         with st.spinner("Analyzing data..."):
@@ -348,15 +422,28 @@ def main():
                     st.metric("Plastic Slope", f"{results.get('S_Plastic', 0):.4f}")
             with col3:
                 if results.get("is_found"):
-                    st.metric("Limit Pressure", f"{results['P_Limit']:.4f}")
-                    st.metric("Limit Displacement", f"{results['D_Limit']:.4f}")
+                    st.metric("Auto Limit Pressure", f"{results['P_Limit']:.4f}")
+                    st.metric("Auto Limit Displacement", f"{results['D_Limit']:.4f}")
                 else:
-                    st.metric("Limit Pressure", "Not Found")
+                    st.metric("Auto Limit Pressure", "Not Found")
                     st.metric("Status", "❌")
             
             # Plot results with enhanced interactivity
             st.subheader("📊 Interactive Analysis Plot")
-            create_interactive_plot(displacements, pressures, results, method)
+            create_interactive_plot(displacements, pressures, results, method, st.session_state.manual_results)
+            
+            # Manual interception interface
+            manual_results = manual_interception_interface(displacements, pressures, method, results['S_Elastic'])
+            if manual_results:
+                st.session_state.manual_results = manual_results
+                # Refresh the plot with manual results
+                st.rerun()
+            
+            # Clear manual results button
+            if st.session_state.manual_results:
+                if st.button("🗑️ Clear Manual Results"):
+                    st.session_state.manual_results = None
+                    st.rerun()
             
             # Detailed results
             st.subheader("🔍 Detailed Results")
@@ -374,11 +461,11 @@ def main():
                     st.write(f"- TES Slope: {results.get('S_TES', 0):.6f}")
                     st.write(f"- TES line equation: P = {results.get('S_TES', 0):.4f} × D")
                     if results.get("is_found"):
-                        st.success("✅ Limit load successfully determined")
-                        st.write(f"- Limit Pressure: {results['P_Limit']:.6f}")
-                        st.write(f"- Limit Displacement: {results['D_Limit']:.6f}")
+                        st.success("✅ Auto limit load successfully determined")
+                        st.write(f"- Auto Limit Pressure: {results['P_Limit']:.6f}")
+                        st.write(f"- Auto Limit Displacement: {results['D_Limit']:.6f}")
                     else:
-                        st.error("❌ Limit load not found with current parameters")
+                        st.error("❌ Auto limit load not found with current parameters")
                         
                 elif method == "TI":
                     st.write("**TI Method Results:**")
@@ -386,11 +473,20 @@ def main():
                     st.write(f"- Plastic Intercept: {results.get('C_Plastic', 0):.6f}")
                     st.write(f"- Plastic line equation: P = {results.get('S_Plastic', 0):.4f} × D + {results.get('C_Plastic', 0):.4f}")
                     if results.get("is_found"):
-                        st.success("✅ Limit load successfully determined")
-                        st.write(f"- Limit Pressure: {results['P_Limit']:.6f}")
-                        st.write(f"- Limit Displacement: {results['D_Limit']:.6f}")
+                        st.success("✅ Auto limit load successfully determined")
+                        st.write(f"- Auto Limit Pressure: {results['P_Limit']:.6f}")
+                        st.write(f"- Auto Limit Displacement: {results['D_Limit']:.6f}")
                     else:
-                        st.error("❌ Limit load not found with current parameters")
+                        st.error("❌ Auto limit load not found with current parameters")
+            
+            # Show manual results if available
+            if st.session_state.manual_results:
+                st.subheader("🎯 Manual Adjustment Results")
+                st.write(f"- Manual Limit Pressure: {st.session_state.manual_results['P_Limit']:.6f}")
+                st.write(f"- Manual Limit Displacement: {st.session_state.manual_results['D_Limit']:.6f}")
+                st.write(f"- Manual Slope Used: {st.session_state.manual_results['manual_slope']:.6f}")
+                if method == "TI":
+                    st.write(f"- Manual Intercept Used: {st.session_state.manual_results.get('manual_intercept', 0):.6f}")
             
             # Download results
             with st.expander("💾 Download Results"):
@@ -412,12 +508,22 @@ Plastic Line Equation: P = {results.get('S_Plastic', 0):.4f} × D + {results.get
                 
                 if results.get("is_found"):
                     results_text += f"""
-LIMIT LOAD RESULTS:
+AUTO LIMIT LOAD RESULTS:
 Limit Pressure: {results['P_Limit']:.6f}
 Limit Displacement: {results['D_Limit']:.6f}
 """
                 else:
-                    results_text += "\nLimit load not found with current parameters."
+                    results_text += "\nAuto limit load not found with current parameters."
+                
+                if st.session_state.manual_results:
+                    results_text += f"""
+MANUAL LIMIT LOAD RESULTS:
+Manual Limit Pressure: {st.session_state.manual_results['P_Limit']:.6f}
+Manual Limit Displacement: {st.session_state.manual_results['D_Limit']:.6f}
+Manual Slope: {st.session_state.manual_results['manual_slope']:.6f}
+"""
+                    if method == "TI":
+                        results_text += f"Manual Intercept: {st.session_state.manual_results.get('manual_intercept', 0):.6f}"
                 
                 st.download_button(
                     label="📥 Download Results as Text",
