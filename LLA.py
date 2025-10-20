@@ -39,6 +39,50 @@ def calculate_slope_through_origin(x_data, y_data):
     S = np.sum(x_data * y_data) / np.sum(x_data**2)
     return S
 
+def find_tes_intersection(displacements, pressures, tes_slope):
+    """Find intersection between TES line and experimental data using interpolation"""
+    # Create fine interpolation for accurate intersection detection
+    fine_d = np.linspace(min(displacements), max(displacements), 1000)
+    fine_p = np.interp(fine_d, displacements, pressures)
+    fine_tes_p = tes_slope * fine_d
+    
+    # Find where experimental data crosses above TES line
+    for i in range(1, len(fine_d)):
+        p_exp = fine_p[i]
+        p_tes = fine_tes_p[i]
+        p_exp_prev = fine_p[i-1]
+        p_tes_prev = fine_tes_p[i-1]
+        
+        # Check if lines cross between i-1 and i
+        if (p_exp_prev <= p_tes_prev and p_exp >= p_tes) or (p_exp_prev >= p_tes_prev and p_exp <= p_tes):
+            # Linear interpolation to find exact intersection
+            d1, d2 = fine_d[i-1], fine_d[i]
+            p_exp1, p_exp2 = fine_p[i-1], fine_p[i]
+            p_tes1, p_tes2 = fine_tes_p[i-1], fine_tes_p[i]
+            
+            # Solve for intersection: p_exp(d) = p_tes(d)
+            # p_exp1 + m_exp*(d - d1) = tes_slope * d
+            # where m_exp = (p_exp2 - p_exp1)/(d2 - d1)
+            
+            m_exp = (p_exp2 - p_exp1) / (d2 - d1) if (d2 - d1) != 0 else 0
+            
+            # tes_slope * d = p_exp1 + m_exp*(d - d1)
+            # tes_slope * d = p_exp1 + m_exp*d - m_exp*d1
+            # tes_slope * d - m_exp*d = p_exp1 - m_exp*d1
+            # d*(tes_slope - m_exp) = p_exp1 - m_exp*d1
+            
+            denominator = tes_slope - m_exp
+            if abs(denominator) > 1e-10:  # Avoid division by zero
+                d_intersect = (p_exp1 - m_exp * d1) / denominator
+                p_intersect = tes_slope * d_intersect
+                
+                # Verify the intersection is within the segment and not at origin
+                if (min(d1, d2) <= d_intersect <= max(d1, d2) and 
+                    d_intersect > 0.1 and p_intersect > 0.1):  # Avoid origin
+                    return p_intersect, d_intersect, True
+    
+    return None, None, False
+
 def run_analysis(displacements, pressures, method, elastic_points, plastic_points):
     """
     Calculates Limit Load using either TES or TI method.
@@ -63,40 +107,11 @@ def run_analysis(displacements, pressures, method, elastic_points, plastic_point
         S_TES = 0.5 * S_Elastic
         results["S_TES"] = S_TES
         
-        P_Limit, D_Limit = np.nan, np.nan
-        is_found = False
-
-        # Find intersection where P_actual >= S_TES * D_actual
-        # Start from i=1 to skip the (0,0) point
-        for i in range(1, N):
-            P_actual = pressures[i]
-            D_actual = displacements[i]
-            P_on_TES = S_TES * D_actual
-
-            # Only consider points where we have actual data (not at origin)
-            if D_actual > 0 and P_actual >= P_on_TES:
-                # Interpolate intersection between point i-1 and i
-                P_prev = pressures[i - 1]
-                D_prev = displacements[i - 1]
-                
-                # Line 1 (Actual Curve segment): P = m_actual * D + c_actual
-                m_actual = (P_actual - P_prev) / (D_actual - D_prev) if (D_actual - D_prev) != 0 else 0
-                c_actual = P_actual - m_actual * D_actual
-
-                # Line 2 (TES Line): P = S_TES * D
-                denominator = S_TES - m_actual
-                
-                if denominator != 0:
-                    D_Limit = c_actual / denominator
-                    P_Limit = S_TES * D_Limit
-                    
-                    # Ensure intersection is not at origin and is within data range
-                    if D_Limit > 0 and P_Limit > 0 and D_Limit <= max(displacements):
-                        is_found = True
-                        break
+        # Use improved intersection detection
+        P_Limit, D_Limit, is_found = find_tes_intersection(displacements, pressures, S_TES)
         
-        results["P_Limit"] = P_Limit if is_found else None
-        results["D_Limit"] = D_Limit if is_found else None
+        results["P_Limit"] = P_Limit
+        results["D_Limit"] = D_Limit
         results["is_found"] = is_found
         
     # --- Tangent Intersection (TI) Method ---
@@ -118,12 +133,12 @@ def run_analysis(displacements, pressures, method, elastic_points, plastic_point
             # D * (S_Elastic - S_Plastic) = C_Plastic
             
             denominator = S_Elastic - S_Plastic
-            if denominator != 0:
+            if abs(denominator) > 1e-10:
                 D_Limit = C_Plastic / denominator
                 P_Limit = S_Elastic * D_Limit
                 
-                # Ensure intersection is not at origin
-                if D_Limit > 0 and P_Limit > 0:
+                # Ensure intersection is not at origin and is reasonable
+                if D_Limit > 0.1 and P_Limit > 0.1 and D_Limit <= max(displacements):
                     results["P_Limit"] = P_Limit
                     results["D_Limit"] = D_Limit
                     results["is_found"] = True
@@ -236,7 +251,7 @@ def create_tes_interception_chart(displacements, pressures, results):
     )
     
     # Add TES intersection point if found (and not at origin)
-    if results.get("is_found") and results["D_Limit"] > 0 and results["P_Limit"] > 0:
+    if results.get("is_found") and results["D_Limit"] is not None and results["P_Limit"] is not None:
         intersection_data = pd.DataFrame({
             'Displacement': [results["D_Limit"]],
             'Pressure': [results["P_Limit"]],
@@ -282,122 +297,14 @@ def create_tes_interception_chart(displacements, pressures, results):
         
     else:
         final_chart = line_chart + points
-        if method == "TES":
-            st.warning("⚠️ No valid TES intersection found (other than origin). Check your data or adjust elastic points.")
-    
-    return final_chart
-
-def create_ti_interception_chart(displacements, pressures, results):
-    """Create specialized chart for TI method showing elastic and plastic intersection"""
-    
-    # Create dense data for smooth cursor movement
-    D_max = max(displacements)
-    dense_displacements = np.linspace(0, D_max, 500)
-    
-    # Create data for all lines
-    chart_data = []
-    
-    # Experimental data (interpolated for smoothness)
-    exp_pressures = np.interp(dense_displacements, displacements, pressures)
-    exp_df = pd.DataFrame({
-        'Displacement': dense_displacements,
-        'Pressure': exp_pressures,
-        'Series': 'Experimental Data',
-        'Line_Type': 'Curve'
-    })
-    chart_data.append(exp_df)
-    
-    # Elastic line
-    elastic_pressures = results["S_Elastic"] * dense_displacements
-    elastic_df = pd.DataFrame({
-        'Displacement': dense_displacements,
-        'Pressure': elastic_pressures,
-        'Series': 'Elastic Slope',
-        'Line_Type': 'Reference'
-    })
-    chart_data.append(elastic_df)
-    
-    # Plastic tangent
-    plastic_pressures = results["S_Plastic"] * dense_displacements + results["C_Plastic"]
-    plastic_df = pd.DataFrame({
-        'Displacement': dense_displacements,
-        'Pressure': plastic_pressures,
-        'Series': 'Plastic Tangent',
-        'Line_Type': 'Reference'
-    })
-    chart_data.append(plastic_df)
-    
-    # Combine all data
-    combined_data = pd.concat(chart_data, ignore_index=True)
-    
-    # Create the main chart
-    line_chart = alt.Chart(combined_data).mark_line().encode(
-        x=alt.X('Displacement:Q', title='Displacement', scale=alt.Scale(zero=False)),
-        y=alt.Y('Pressure:Q', title='Pressure', scale=alt.Scale(zero=False)),
-        color=alt.Color('Series:N', legend=alt.Legend(title="Lines")),
-        strokeDash=alt.condition(
-            alt.datum.Series == 'Experimental Data',
-            alt.value([0]),  # solid for experimental
-            alt.value([5, 5])  # dashed for reference lines
-        ),
-        tooltip=[
-            alt.Tooltip('Series:N', title='Line'),
-            alt.Tooltip('Displacement:Q', title='Displacement', format='.4f'),
-            alt.Tooltip('Pressure:Q', title='Pressure', format='.4f')
-        ]
-    ).properties(
-        width=800,
-        height=500,
-        title="TI Method - Intersection of Elastic and Plastic Tangents"
-    ).interactive()
-    
-    # Add original data points as circles
-    points_data = pd.DataFrame({
-        'Displacement': displacements,
-        'Pressure': pressures,
-        'Series': 'Data Points'
-    })
-    
-    points = alt.Chart(points_data).mark_circle(
-        size=60,
-        color='blue',
-        opacity=0.6
-    ).encode(
-        x='Displacement:Q',
-        y='Pressure:Q',
-        tooltip=[
-            alt.Tooltip('Displacement:Q', title='Displacement', format='.4f'),
-            alt.Tooltip('Pressure:Q', title='Pressure', format='.4f')
-        ]
-    )
-    
-    # Add intersection point if found (and not at origin)
-    if results.get("is_found") and results["D_Limit"] > 0 and results["P_Limit"] > 0:
-        intersection_data = pd.DataFrame({
-            'Displacement': [results["D_Limit"]],
-            'Pressure': [results["P_Limit"]],
-            'Series': ['Tangent Intersection Point'],
-            'Description': [f'TI Intersection: D={results["D_Limit"]:.4f}, P={results["P_Limit"]:.4f}']
-        })
-        
-        intersection_point = alt.Chart(intersection_data).mark_point(
-            size=300,
-            color='orange',
-            shape='diamond',
-            filled=True
-        ).encode(
-            x='Displacement:Q',
-            y='Pressure:Q',
-            tooltip=[
-                alt.Tooltip('Description:N', title='Intersection')
-            ]
-        )
-        
-        final_chart = line_chart + points + intersection_point
-    else:
-        final_chart = line_chart + points
-        if method == "TI":
-            st.warning("⚠️ No valid tangent intersection found. Check your data or adjust plastic points.")
+        # Show manual intersection detection help
+        st.warning("""
+        ⚠️ **Auto intersection not found. Here's how to find it manually:**
+        1. Look at the plot where the **red TES line** crosses the **blue experimental data line**
+        2. Move your cursor over that intersection area to see coordinates
+        3. The intersection should be where the lines cross (not at origin)
+        4. Try adjusting the **Number of Elastic Points** in the sidebar
+        """)
     
     return final_chart
 
@@ -408,12 +315,11 @@ def main():
     
     # Instructions
     st.success("""
-    **🎯 TRUE FREE CURSOR MOVEMENT!**
-    - **Move your mouse cursor** over ANY part of the lines
-    - **See exact coordinates** in real-time as you move
-    - **NO AUTO-SNAPPING** - continuous cursor tracking
-    - **TES Method**: Shows intersection between TES line (red) and experimental data
-    - **TI Method**: Shows intersection between elastic and plastic tangents
+    **🎯 IMPROVED INTERSECTION DETECTION!**
+    - **Better algorithm** to find where TES line crosses experimental data
+    - **Fine interpolation** for accurate intersection points
+    - **Avoids origin** - intersection will NOT be at (0,0)
+    - **Move cursor freely** to explore coordinates
     """)
     
     # Sidebar for inputs
@@ -424,7 +330,8 @@ def main():
         "Number of Elastic Points", 
         min_value=2, 
         value=5,
-        help="Number of initial points used for elastic slope calculation"
+        help="Number of initial points used for elastic slope calculation",
+        key="elastic_points"
     )
     
     if method == "TI":
@@ -435,7 +342,7 @@ def main():
             help="Number of final points used for plastic tangent calculation"
         )
     else:
-        plastic_points = 5  # Not used for TES, but needed for function call
+        plastic_points = 5
     
     # Data input section
     st.sidebar.header("📊 Input Data")
@@ -491,7 +398,7 @@ def main():
                 elif method == "TI":
                     st.metric("Plastic Slope", f"{results.get('S_Plastic', 0):.4f}")
             with col3:
-                if results.get("is_found") and results["D_Limit"] > 0 and results["P_Limit"] > 0:
+                if results.get("is_found") and results["D_Limit"] is not None and results["P_Limit"] is not None:
                     st.metric("Limit Pressure", f"{results['P_Limit']:.4f}")
                     st.metric("Limit Displacement", f"{results['D_Limit']:.4f}")
                 else:
@@ -500,36 +407,35 @@ def main():
             
             # Plot with specialized interception display
             st.subheader("📊 Interactive Plot - TES Line Intersection")
-            st.markdown("""
-            **🖱️ TES Method Features:**
-            - **Red TES Line**: 0.5 × Elastic Slope (starts from origin)
-            - **Red Diamond**: Intersection point between TES line and experimental data (NOT at origin)
-            - **Dashed lines**: Help visualize the intersection coordinates
-            - **Move cursor freely** over any line to see coordinates
-            """)
+            
+            if method == "TES":
+                st.markdown("""
+                **🔍 Looking for Intersection:**
+                - **Red TES Line** = 0.5 × Elastic Slope
+                - **Intersection** = Where red line crosses blue experimental data
+                - **NOT at origin** - should be where curves cross
+                """)
             
             try:
                 if method == "TES":
                     chart = create_tes_interception_chart(displacements, pressures, results)
-                else:
-                    chart = create_ti_interception_chart(displacements, pressures, results)
-                
-                st.altair_chart(chart, use_container_width=True)
+                    st.altair_chart(chart, use_container_width=True)
+                    
+                    # Show intersection details if found
+                    if results.get("is_found") and results["D_Limit"] is not None and results["P_Limit"] is not None:
+                        st.success(f"🎯 **TES INTERSECTION FOUND!**")
+                        st.info(f"""
+                        **Intersection Coordinates:**
+                        - **Displacement**: {results['D_Limit']:.4f}
+                        - **Pressure**: {results['P_Limit']:.4f}
+                        - **TES Slope**: {results.get('S_TES', 0):.4f}
+                        
+                        **This is where the red TES line crosses the experimental data curve.**
+                        """)
                 
             except Exception as e:
                 st.error(f"Error creating interactive chart: {e}")
                 st.info("Please make sure Altair is installed: `pip install altair`")
-            
-            # Highlight the TES intersection specifically
-            if method == "TES" and results.get("is_found") and results["D_Limit"] > 0 and results["P_Limit"] > 0:
-                st.success(f"🎯 **TES Intersection Found!**")
-                st.info(f"""
-                **TES Line (Red) intersects Experimental Data at:**
-                - **Displacement**: {results['D_Limit']:.4f}
-                - **Pressure**: {results['P_Limit']:.4f}
-                - **TES Slope**: {results.get('S_TES', 0):.4f} (0.5 × Elastic Slope)
-                - **Note**: Intersection is NOT at origin (0,0)
-                """)
 
 if __name__ == "__main__":
     main()
