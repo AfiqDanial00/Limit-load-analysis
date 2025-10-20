@@ -1,8 +1,7 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import altair as alt
 
 # --- App Configuration ---
 st.set_page_config(
@@ -131,112 +130,207 @@ def run_analysis(displacements, pressures, method, elastic_points, plastic_point
     
     return results
 
-def create_interactive_plot(displacements, pressures, results, method):
-    """Create interactive visualization using Plotly with free cursor movement"""
+def create_interactive_altair_chart(displacements, pressures, results, method):
+    """Create interactive Altair chart with free cursor movement"""
     
-    # Create the main figure
-    fig = go.Figure()
+    # Create main data
+    data = pd.DataFrame({
+        'Displacement': displacements,
+        'Pressure': pressures,
+        'Series': 'Experimental Data'
+    })
     
-    # Add experimental data
-    fig.add_trace(go.Scatter(
-        x=displacements, 
-        y=pressures,
-        mode='lines+markers',
-        name='Experimental Data',
-        line=dict(color='blue', width=3),
-        marker=dict(size=6, color='blue'),
-        hovertemplate='<b>Experimental Data</b><br>Displacement: %{x:.4f}<br>Pressure: %{y:.4f}<extra></extra>'
-    ))
+    # Generate points for lines
+    D_max = max(displacements)
+    line_points = np.linspace(0, D_max, 100)
+    
+    # Elastic line
+    elastic_line = pd.DataFrame({
+        'Displacement': line_points,
+        'Pressure': results["S_Elastic"] * line_points,
+        'Series': 'Elastic Slope'
+    })
+    
+    lines_data = [data, elastic_line]
+    
+    if method == "TES":
+        # TES line
+        tes_line = pd.DataFrame({
+            'Displacement': line_points,
+            'Pressure': 0.5 * results["S_Elastic"] * line_points,
+            'Series': 'TES Line (0.5 × Elastic Slope)'
+        })
+        lines_data.append(tes_line)
+        
+    elif method == "TI" and results.get("S_Plastic") is not None:
+        # Plastic tangent
+        plastic_line = pd.DataFrame({
+            'Displacement': line_points,
+            'Pressure': results["S_Plastic"] * line_points + results["C_Plastic"],
+            'Series': 'Plastic Tangent'
+        })
+        lines_data.append(plastic_line)
+    
+    # Combine all data
+    chart_data = pd.concat(lines_data, ignore_index=True)
+    
+    # Create interactive chart
+    chart = alt.Chart(chart_data).mark_line().encode(
+        x=alt.X('Displacement:Q', title='Displacement'),
+        y=alt.Y('Pressure:Q', title='Pressure'),
+        color=alt.Color('Series:N', legend=alt.Legend(title='Lines')),
+        strokeDash=alt.condition(
+            alt.datum.Series == 'Experimental Data',
+            alt.value([0]),  # solid line for experimental data
+            alt.value([5, 5])  # dashed for other lines
+        )
+    ).properties(
+        width=800,
+        height=500,
+        title=f"Limit Load Analysis - {method} Method"
+    ).interactive()
+    
+    # Add points for experimental data
+    points = alt.Chart(data).mark_circle(size=60).encode(
+        x='Displacement:Q',
+        y='Pressure:Q',
+        color=alt.value('blue'),
+        tooltip=['Displacement:Q', 'Pressure:Q']
+    )
+    
+    # Add limit load point if found
+    if results.get("is_found"):
+        limit_point = pd.DataFrame({
+            'Displacement': [results["D_Limit"]],
+            'Pressure': [results["P_Limit"]],
+            'Series': ['Limit Load Point']
+        })
+        
+        limit_chart = alt.Chart(limit_point).mark_point(
+            size=200,
+            color='red',
+            shape='diamond'
+        ).encode(
+            x='Displacement:Q',
+            y='Pressure:Q',
+            tooltip=['Displacement:Q', 'Pressure:Q']
+        )
+        chart = chart + points + limit_chart
+    else:
+        chart = chart + points
+    
+    return chart
+
+def create_enhanced_streamlit_plot(displacements, pressures, results, method):
+    """Create enhanced visualization with better tooltips"""
+    
+    # Create comprehensive data frame with all series
+    plot_data = []
+    
+    # Experimental data with detailed information
+    for i, (d, p) in enumerate(zip(displacements, pressures)):
+        exp_df = pd.DataFrame({
+            'Displacement': [d],
+            'Pressure': [p],
+            'Series': ['Experimental Data'],
+            'Point_Info': [f'Point {i}: D={d:.4f}, P={p:.4f}']
+        })
+        plot_data.append(exp_df)
     
     # Generate points for elastic line
     D_max = max(displacements)
-    elastic_displacements = np.linspace(0, D_max, 100)
+    elastic_displacements = np.linspace(0, D_max, 50)
     elastic_pressures = results["S_Elastic"] * elastic_displacements
     
-    # Add elastic line
-    fig.add_trace(go.Scatter(
-        x=elastic_displacements,
-        y=elastic_pressures,
-        mode='lines',
-        name='Elastic Slope',
-        line=dict(color='green', width=2, dash='dash'),
-        hovertemplate='<b>Elastic Slope</b><br>Displacement: %{x:.4f}<br>Pressure: %{y:.4f}<br>Slope: %.4f<extra></extra>' % results["S_Elastic"]
-    ))
+    elastic_df = pd.DataFrame({
+        'Displacement': elastic_displacements,
+        'Pressure': elastic_pressures,
+        'Series': ['Elastic Slope'] * len(elastic_displacements),
+        'Point_Info': [f'Elastic: D={d:.4f}, P={p:.4f}' for d, p in zip(elastic_displacements, elastic_pressures)]
+    })
+    plot_data.append(elastic_df)
     
     if method == "TES":
         # Generate points for TES line
         tes_pressures = 0.5 * results["S_Elastic"] * elastic_displacements
         
-        # Add TES line
-        fig.add_trace(go.Scatter(
-            x=elastic_displacements,
-            y=tes_pressures,
-            mode='lines',
-            name='TES Line (0.5 × Elastic Slope)',
-            line=dict(color='red', width=2, dash='dot'),
-            hovertemplate='<b>TES Line</b><br>Displacement: %{x:.4f}<br>Pressure: %{y:.4f}<br>Slope: %.4f<extra></extra>' % (0.5 * results["S_Elastic"])
-        ))
+        tes_df = pd.DataFrame({
+            'Displacement': elastic_displacements,
+            'Pressure': tes_pressures,
+            'Series': ['TES Line (0.5 × Elastic Slope)'] * len(elastic_displacements),
+            'Point_Info': [f'TES: D={d:.4f}, P={p:.4f}' for d, p in zip(elastic_displacements, tes_pressures)]
+        })
+        plot_data.append(tes_df)
         
     elif method == "TI" and results.get("S_Plastic") is not None:
         # Generate points for plastic tangent
         plastic_pressures = results["S_Plastic"] * elastic_displacements + results["C_Plastic"]
         
-        # Add plastic tangent
-        fig.add_trace(go.Scatter(
-            x=elastic_displacements,
-            y=plastic_pressures,
-            mode='lines',
-            name='Plastic Tangent',
-            line=dict(color='orange', width=2, dash='dash'),
-            hovertemplate='<b>Plastic Tangent</b><br>Displacement: %{x:.4f}<br>Pressure: %{y:.4f}<extra></extra>'
-        ))
+        plastic_df = pd.DataFrame({
+            'Displacement': elastic_displacements,
+            'Pressure': plastic_pressures,
+            'Series': ['Plastic Tangent'] * len(elastic_displacements),
+            'Point_Info': [f'Plastic: D={d:.4f}, P={p:.4f}' for d, p in zip(elastic_displacements, plastic_pressures)]
+        })
+        plot_data.append(plastic_df)
+    
+    # Combine all data
+    combined_df = pd.concat(plot_data, ignore_index=True)
+    
+    # Display instructions
+    st.markdown("""
+    **🎯 Free Cursor Movement - How to use:**
+    - **Hover** over any point on the lines to see exact coordinates
+    - **Click and drag** to zoom into specific areas  
+    - **Double-click** to reset the zoom
+    - Use the **toolbar** in the top-right corner for more options
+    - **Scroll** to zoom in/out
+    """)
+    
+    # Try to use Altair for better interactivity
+    try:
+        altair_chart = create_interactive_altair_chart(displacements, pressures, results, method)
+        st.altair_chart(altair_chart, use_container_width=True)
+    except:
+        # Fallback to Streamlit native charts
+        st.info("Using enhanced Streamlit charts - hover over data points to see coordinates")
+        
+        # Create the main chart
+        main_data = combined_df[combined_df['Series'] == 'Experimental Data']
+        chart = st.line_chart(
+            main_data, 
+            x='Displacement', 
+            y='Pressure',
+            height=500
+        )
+        
+        # Add other lines
+        other_series = combined_df[combined_df['Series'] != 'Experimental Data']
+        for series in other_series['Series'].unique():
+            series_data = other_series[other_series['Series'] == series]
+            st.line_chart(
+                series_data,
+                x='Displacement',
+                y='Pressure'
+            )
     
     # Add limit load point if found
     if results.get("is_found"):
-        fig.add_trace(go.Scatter(
-            x=[results["D_Limit"]],
-            y=[results["P_Limit"]],
-            mode='markers',
-            name='Limit Load Point',
-            marker=dict(size=12, color='red', symbol='star'),
-            hovertemplate='<b>Limit Load Point</b><br>Displacement: %.4f<br>Pressure: %.4f<extra></extra>' % (results["D_Limit"], results["P_Limit"])
-        ))
-    
-    # Update layout for better interactivity
-    fig.update_layout(
-        title=f"Limit Load Analysis - {method} Method<br><sub>Move cursor freely over the plot to see coordinates</sub>",
-        xaxis_title="Displacement",
-        yaxis_title="Pressure",
-        height=600,
-        hovermode='x unified',  # This shows all y-values at the same x-coordinate
-        showlegend=True,
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
-        # Add crosshair for better cursor tracking
-        xaxis=dict(
-            showspikes=True,
-            spikemode='across',
-            spikesnap='cursor',
-            showline=True,
-            showgrid=True,
-            spikedash='solid'
-        ),
-        yaxis=dict(
-            showspikes=True,
-            spikemode='across',
-            spikesnap='cursor',
-            showline=True,
-            showgrid=True,
-            spikedash='solid'
+        st.success(f"🎯 Limit Load Found at P = {results['P_Limit']:.4f}, D = {results['D_Limit']:.4f}")
+        
+        # Create a separate chart for the limit point
+        limit_df = pd.DataFrame({
+            'Displacement': [results["D_Limit"]],
+            'Pressure': [results["P_Limit"]],
+            'Series': ['Limit Load Point'],
+            'Point_Info': [f'LIMIT: D={results["D_Limit"]:.4f}, P={results["P_Limit"]:.4f}']
+        })
+        
+        st.scatter_chart(
+            limit_df,
+            x='Displacement',
+            y='Pressure'
         )
-    )
-    
-    # Configure hover behavior
-    fig.update_traces(
-        hoverinfo='skip',  # We use custom hovertemplates instead
-        selector=dict(type='scatter')
-    )
-    
-    return fig
 
 # --- Streamlit UI ---
 def main():
@@ -244,7 +338,7 @@ def main():
     st.markdown("**TES (Twice Elastic Slope) & TI (Tangent Intersection) Methods**")
     
     # Instructions for cursor functionality
-    st.info("🎯 **New Feature**: Move your cursor freely over the plot to see exact coordinates anywhere on the lines!")
+    st.info("🎯 **Interactive Feature**: Move your cursor freely over the plot lines to see exact coordinates!")
     
     # Sidebar for inputs
     st.sidebar.header("⚙️ Analysis Parameters")
@@ -328,22 +422,9 @@ def main():
                     st.metric("Limit Pressure", "Not Found")
                     st.metric("Status", "❌")
             
-            # Plot results with interactive cursor
+            # Plot results with enhanced interactivity
             st.subheader("📊 Interactive Analysis Plot")
-            st.markdown("""
-            **🖱️ Cursor Controls:**
-            - **Move cursor** anywhere over the plot to see coordinates
-            - **Hover over lines** to see values from all series at that x-position
-            - **Click and drag** to zoom
-            - **Double-click** to reset zoom
-            - Use **toolbar** for additional controls
-            """)
-            
-            plotly_fig = create_interactive_plot(displacements, pressures, results, method)
-            st.plotly_chart(plotly_fig, use_container_width=True)
-            
-            if results.get("is_found"):
-                st.success(f"🎯 Limit Load Found at P = {results['P_Limit']:.4f}, D = {results['D_Limit']:.4f}")
+            create_enhanced_streamlit_plot(displacements, pressures, results, method)
             
             # Detailed results
             st.subheader("🔍 Detailed Results")
@@ -379,8 +460,9 @@ def main():
                     else:
                         st.error("❌ Limit load not found with current parameters")
             
-            # Raw data table
-            with st.expander("📋 View Raw Data Table"):
+            # Raw data table with coordinates
+            with st.expander("📋 View Raw Data Table with Coordinates"):
+                st.markdown("**All Data Points with Exact Coordinates:**")
                 data_df = pd.DataFrame({
                     'Point': range(len(displacements)),
                     'Displacement': displacements,
