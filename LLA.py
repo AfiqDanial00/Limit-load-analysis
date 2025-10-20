@@ -67,12 +67,14 @@ def run_analysis(displacements, pressures, method, elastic_points, plastic_point
         is_found = False
 
         # Find intersection where P_actual >= S_TES * D_actual
+        # Start from i=1 to skip the (0,0) point
         for i in range(1, N):
             P_actual = pressures[i]
             D_actual = displacements[i]
             P_on_TES = S_TES * D_actual
 
-            if P_actual >= P_on_TES:
+            # Only consider points where we have actual data (not at origin)
+            if D_actual > 0 and P_actual >= P_on_TES:
                 # Interpolate intersection between point i-1 and i
                 P_prev = pressures[i - 1]
                 D_prev = displacements[i - 1]
@@ -87,8 +89,11 @@ def run_analysis(displacements, pressures, method, elastic_points, plastic_point
                 if denominator != 0:
                     D_Limit = c_actual / denominator
                     P_Limit = S_TES * D_Limit
-                    is_found = True
-                break
+                    
+                    # Ensure intersection is not at origin and is within data range
+                    if D_Limit > 0 and P_Limit > 0 and D_Limit <= max(displacements):
+                        is_found = True
+                        break
         
         results["P_Limit"] = P_Limit if is_found else None
         results["D_Limit"] = D_Limit if is_found else None
@@ -116,9 +121,16 @@ def run_analysis(displacements, pressures, method, elastic_points, plastic_point
             if denominator != 0:
                 D_Limit = C_Plastic / denominator
                 P_Limit = S_Elastic * D_Limit
-                results["P_Limit"] = P_Limit
-                results["D_Limit"] = D_Limit
-                results["is_found"] = True
+                
+                # Ensure intersection is not at origin
+                if D_Limit > 0 and P_Limit > 0:
+                    results["P_Limit"] = P_Limit
+                    results["D_Limit"] = D_Limit
+                    results["is_found"] = True
+                else:
+                    results["P_Limit"] = None
+                    results["D_Limit"] = None
+                    results["is_found"] = False
             else:
                 results["P_Limit"] = None
                 results["D_Limit"] = None
@@ -223,8 +235,8 @@ def create_tes_interception_chart(displacements, pressures, results):
         ]
     )
     
-    # Add TES intersection point if found
-    if results.get("is_found"):
+    # Add TES intersection point if found (and not at origin)
+    if results.get("is_found") and results["D_Limit"] > 0 and results["P_Limit"] > 0:
         intersection_data = pd.DataFrame({
             'Displacement': [results["D_Limit"]],
             'Pressure': [results["P_Limit"]],
@@ -270,6 +282,8 @@ def create_tes_interception_chart(displacements, pressures, results):
         
     else:
         final_chart = line_chart + points
+        if method == "TES":
+            st.warning("⚠️ No valid TES intersection found (other than origin). Check your data or adjust elastic points.")
     
     return final_chart
 
@@ -357,8 +371,8 @@ def create_ti_interception_chart(displacements, pressures, results):
         ]
     )
     
-    # Add intersection point if found
-    if results.get("is_found"):
+    # Add intersection point if found (and not at origin)
+    if results.get("is_found") and results["D_Limit"] > 0 and results["P_Limit"] > 0:
         intersection_data = pd.DataFrame({
             'Displacement': [results["D_Limit"]],
             'Pressure': [results["P_Limit"]],
@@ -382,6 +396,8 @@ def create_ti_interception_chart(displacements, pressures, results):
         final_chart = line_chart + points + intersection_point
     else:
         final_chart = line_chart + points
+        if method == "TI":
+            st.warning("⚠️ No valid tangent intersection found. Check your data or adjust plastic points.")
     
     return final_chart
 
@@ -475,7 +491,7 @@ def main():
                 elif method == "TI":
                     st.metric("Plastic Slope", f"{results.get('S_Plastic', 0):.4f}")
             with col3:
-                if results.get("is_found"):
+                if results.get("is_found") and results["D_Limit"] > 0 and results["P_Limit"] > 0:
                     st.metric("Limit Pressure", f"{results['P_Limit']:.4f}")
                     st.metric("Limit Displacement", f"{results['D_Limit']:.4f}")
                 else:
@@ -486,8 +502,8 @@ def main():
             st.subheader("📊 Interactive Plot - TES Line Intersection")
             st.markdown("""
             **🖱️ TES Method Features:**
-            - **Red TES Line**: 0.5 × Elastic Slope
-            - **Red Diamond**: Intersection point between TES line and experimental data
+            - **Red TES Line**: 0.5 × Elastic Slope (starts from origin)
+            - **Red Diamond**: Intersection point between TES line and experimental data (NOT at origin)
             - **Dashed lines**: Help visualize the intersection coordinates
             - **Move cursor freely** over any line to see coordinates
             """)
@@ -505,48 +521,15 @@ def main():
                 st.info("Please make sure Altair is installed: `pip install altair`")
             
             # Highlight the TES intersection specifically
-            if method == "TES" and results.get("is_found"):
+            if method == "TES" and results.get("is_found") and results["D_Limit"] > 0 and results["P_Limit"] > 0:
                 st.success(f"🎯 **TES Intersection Found!**")
                 st.info(f"""
                 **TES Line (Red) intersects Experimental Data at:**
                 - **Displacement**: {results['D_Limit']:.4f}
                 - **Pressure**: {results['P_Limit']:.4f}
                 - **TES Slope**: {results.get('S_TES', 0):.4f} (0.5 × Elastic Slope)
+                - **Note**: Intersection is NOT at origin (0,0)
                 """)
-            
-            # Detailed results
-            st.subheader("🔍 Detailed Results")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write("**Elastic Region Analysis:**")
-                st.write(f"- Elastic Slope (S_Elastic): {results['S_Elastic']:.6f}")
-                st.write(f"- Points used for elastic slope: {min(elastic_points, len(displacements) - 1)}")
-                st.write(f"- Elastic line equation: P = {results['S_Elastic']:.4f} × D")
-                
-            with col2:
-                if method == "TES":
-                    st.write("**TES Method Results:**")
-                    st.write(f"- TES Slope: {results.get('S_TES', 0):.6f}")
-                    st.write(f"- TES line equation: P = {results.get('S_TES', 0):.4f} × D")
-                    if results.get("is_found"):
-                        st.success("✅ TES intersection successfully determined")
-                        st.write(f"- Intersection Pressure: {results['P_Limit']:.6f}")
-                        st.write(f"- Intersection Displacement: {results['D_Limit']:.6f}")
-                    else:
-                        st.error("❌ TES intersection not found with current parameters")
-                        
-                elif method == "TI":
-                    st.write("**TI Method Results:**")
-                    st.write(f"- Plastic Slope: {results.get('S_Plastic', 0):.6f}")
-                    st.write(f"- Plastic Intercept: {results.get('C_Plastic', 0):.6f}")
-                    st.write(f"- Plastic line equation: P = {results.get('S_Plastic', 0):.4f} × D + {results.get('C_Plastic', 0):.4f}")
-                    if results.get("is_found"):
-                        st.success("✅ Tangent intersection successfully determined")
-                        st.write(f"- Intersection Pressure: {results['P_Limit']:.6f}")
-                        st.write(f"- Intersection Displacement: {results['D_Limit']:.6f}")
-                    else:
-                        st.error("❌ Tangent intersection not found with current parameters")
 
 if __name__ == "__main__":
     main()
