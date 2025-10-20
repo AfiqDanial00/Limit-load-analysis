@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
+import altair as alt
 
 # --- App Configuration ---
 st.set_page_config(
@@ -129,165 +130,138 @@ def run_analysis(displacements, pressures, method, elastic_points, plastic_point
     
     return results
 
-def create_interactive_plot_with_free_cursor(displacements, pressures, results, method):
-    """Create visualization with manual coordinate exploration"""
+def create_free_cursor_chart(displacements, pressures, results, method):
+    """Create Altair chart with true free cursor movement - NO AUTO-SNAP!"""
     
-    # Create comprehensive data frame with all series
-    plot_data = []
-    
-    # Experimental data
-    exp_df = pd.DataFrame({
-        'Displacement': displacements,
-        'Pressure': pressures,
-        'Series': 'Experimental Data',
-        'Point_Type': 'Data'
-    })
-    plot_data.append(exp_df)
-    
-    # Generate points for elastic line
+    # Create dense data for smooth cursor movement
     D_max = max(displacements)
-    elastic_displacements = np.linspace(0, D_max, 100)
-    elastic_pressures = results["S_Elastic"] * elastic_displacements
+    dense_displacements = np.linspace(0, D_max, 500)
     
-    elastic_df = pd.DataFrame({
-        'Displacement': elastic_displacements,
-        'Pressure': elastic_pressures,
-        'Series': 'Elastic Slope',
-        'Point_Type': 'Line'
+    # Create data for all lines
+    chart_data = []
+    
+    # Experimental data (interpolated for smoothness)
+    exp_pressures = np.interp(dense_displacements, displacements, pressures)
+    exp_df = pd.DataFrame({
+        'Displacement': dense_displacements,
+        'Pressure': exp_pressures,
+        'Series': 'Experimental Data'
     })
-    plot_data.append(elastic_df)
+    chart_data.append(exp_df)
+    
+    # Elastic line
+    elastic_pressures = results["S_Elastic"] * dense_displacements
+    elastic_df = pd.DataFrame({
+        'Displacement': dense_displacements,
+        'Pressure': elastic_pressures,
+        'Series': 'Elastic Slope'
+    })
+    chart_data.append(elastic_df)
     
     if method == "TES":
-        # Generate points for TES line
-        tes_pressures = 0.5 * results["S_Elastic"] * elastic_displacements
-        
+        # TES line
+        tes_pressures = 0.5 * results["S_Elastic"] * dense_displacements
         tes_df = pd.DataFrame({
-            'Displacement': elastic_displacements,
+            'Displacement': dense_displacements,
             'Pressure': tes_pressures,
-            'Series': 'TES Line (0.5 × Elastic Slope)',
-            'Point_Type': 'Line'
+            'Series': 'TES Line (0.5 × Elastic Slope)'
         })
-        plot_data.append(tes_df)
+        chart_data.append(tes_df)
         
     elif method == "TI" and results.get("S_Plastic") is not None:
-        # Generate points for plastic tangent
-        plastic_pressures = results["S_Plastic"] * elastic_displacements + results["C_Plastic"]
-        
+        # Plastic tangent
+        plastic_pressures = results["S_Plastic"] * dense_displacements + results["C_Plastic"]
         plastic_df = pd.DataFrame({
-            'Displacement': elastic_displacements,
+            'Displacement': dense_displacements,
             'Pressure': plastic_pressures,
-            'Series': 'Plastic Tangent',
-            'Point_Type': 'Line'
+            'Series': 'Plastic Tangent'
         })
-        plot_data.append(plastic_df)
+        chart_data.append(plastic_df)
     
     # Combine all data
-    combined_df = pd.concat(plot_data, ignore_index=True)
+    combined_data = pd.concat(chart_data, ignore_index=True)
     
-    # --- MANUAL COORDINATE EXPLORER ---
-    st.markdown("---")
-    st.subheader("🎯 Free Coordinate Explorer")
-    st.info("**Move the slider to explore any point along the lines freely - NO AUTO-SNAP!**")
+    # Create the interactive chart
+    line_chart = alt.Chart(combined_data).mark_line().encode(
+        x=alt.X('Displacement:Q', title='Displacement', scale=alt.Scale(zero=False)),
+        y=alt.Y('Pressure:Q', title='Pressure', scale=alt.Scale(zero=False)),
+        color=alt.Color('Series:N', legend=alt.Legend(title="Lines")),
+        strokeDash=alt.condition(
+            alt.datum.Series == 'Experimental Data',
+            alt.value([0]),  # solid for experimental
+            alt.value([5, 5])  # dashed for others
+        ),
+        tooltip=[
+            alt.Tooltip('Series:N', title='Line'),
+            alt.Tooltip('Displacement:Q', title='Displacement', format='.4f'),
+            alt.Tooltip('Pressure:Q', title='Pressure', format='.4f')
+        ]
+    ).properties(
+        width=800,
+        height=500,
+        title=f"Limit Load Analysis - {method} Method - Move cursor freely over lines!"
+    ).interactive()
     
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col1:
-        manual_d = st.slider(
-            "Displacement Position",
-            min_value=float(0),
-            max_value=float(max(displacements)),
-            value=float(max(displacements) / 2),
-            step=0.001,
-            format="%.4f",
-            key="manual_displacement"
-        )
-    
-    with col2:
-        # Calculate corresponding pressure values for manual displacement
-        elastic_p = results["S_Elastic"] * manual_d
-        experimental_p = np.interp(manual_d, displacements, pressures)
-        
-        st.metric("Current Position", f"D = {manual_d:.4f}")
-        st.metric("Experimental Data Pressure", f"{experimental_p:.4f}")
-        st.metric("Elastic Line Pressure", f"{elastic_p:.4f}")
-        
-        if method == "TES":
-            tes_p = 0.5 * results["S_Elastic"] * manual_d
-            st.metric("TES Line Pressure", f"{tes_p:.4f}")
-        elif method == "TI" and results.get("S_Plastic") is not None:
-            plastic_p = results["S_Plastic"] * manual_d + results["C_Plastic"]
-            st.metric("Plastic Line Pressure", f"{plastic_p:.4f}")
-    
-    with col3:
-        st.markdown("**Line Equations:**")
-        st.write(f"**Elastic:** P = {results['S_Elastic']:.4f} × D")
-        if method == "TES":
-            st.write(f"**TES:** P = {0.5 * results['S_Elastic']:.4f} × D")
-        elif method == "TI" and results.get("S_Plastic") is not None:
-            st.write(f"**Plastic:** P = {results['S_Plastic']:.4f} × D + {results['C_Plastic']:.4f}")
-    
-    # Create the main chart with the current manual position
-    st.markdown("---")
-    st.subheader("📊 Analysis Plot")
-    
-    # Add manual point to the data
-    manual_point_df = pd.DataFrame({
-        'Displacement': [manual_d],
-        'Pressure': [experimental_p],
-        'Series': ['Current Position'],
-        'Point_Type': ['Manual']
+    # Add original data points as circles
+    points_data = pd.DataFrame({
+        'Displacement': displacements,
+        'Pressure': pressures,
+        'Series': 'Data Points'
     })
     
-    all_data_df = pd.concat([combined_df, manual_point_df], ignore_index=True)
-    
-    # Create the main chart
-    chart = st.line_chart(
-        all_data_df[all_data_df['Point_Type'].isin(['Line', 'Data'])], 
-        x='Displacement', 
-        y='Pressure', 
-        color='Series',
-        height=500
+    points = alt.Chart(points_data).mark_circle(
+        size=60,
+        color='blue',
+        opacity=0.6
+    ).encode(
+        x='Displacement:Q',
+        y='Pressure:Q',
+        tooltip=[
+            alt.Tooltip('Displacement:Q', title='Displacement', format='.4f'),
+            alt.Tooltip('Pressure:Q', title='Pressure', format='.4f')
+        ]
     )
     
-    # Add manual point as a separate scatter plot
-    st.scatter_chart(
-        manual_point_df,
-        x='Displacement',
-        y='Pressure',
-        color='Series',
-        size=100
-    )
-    
-    # Add limit point as a separate scatter plot if found
+    # Add limit load point if found
     if results.get("is_found"):
-        limit_points = pd.DataFrame({
+        limit_data = pd.DataFrame({
             'Displacement': [results["D_Limit"]],
             'Pressure': [results["P_Limit"]],
-            'Series': ['Auto Limit Load Point']
+            'Series': ['Limit Load Point']
         })
         
-        st.scatter_chart(
-            limit_points,
-            x='Displacement',
-            y='Pressure',
-            color='Series',
-            size=100
+        limit_points = alt.Chart(limit_data).mark_point(
+            size=200,
+            color='red',
+            shape='diamond'
+        ).encode(
+            x='Displacement:Q',
+            y='Pressure:Q',
+            tooltip=[
+                alt.Tooltip('Displacement:Q', title='Limit Displacement', format='.4f'),
+                alt.Tooltip('Pressure:Q', title='Limit Pressure', format='.4f')
+            ]
         )
         
-        st.success(f"🎯 Auto Limit Load Found at P = {results['P_Limit']:.4f}, D = {results['D_Limit']:.4f}")
+        final_chart = line_chart + points + limit_points
+    else:
+        final_chart = line_chart + points
+    
+    return final_chart
 
 # --- Streamlit UI ---
 def main():
     st.title("🔬 Limit Load Analyzer")
     st.markdown("**TES (Twice Elastic Slope) & TI (Tangent Intersection) Methods**")
     
-    # Instructions for new cursor functionality
+    # Instructions for true free cursor movement
     st.success("""
-    **🎯 NEW: True Free Cursor Movement!**
-    - **No auto-snapping** to data points
-    - **Move the slider freely** to explore any coordinate
-    - **See exact values** on all lines simultaneously
-    - **Continuous exploration** - not limited to discrete points
+    **🎯 TRUE FREE CURSOR MOVEMENT!**
+    - **Move your mouse cursor** over ANY part of the lines
+    - **See exact coordinates** in real-time as you move
+    - **NO AUTO-SNAPPING** - continuous cursor tracking
+    - **Hover over lines** to see displacement and pressure values
+    - **Click and drag** to zoom, **double-click** to reset
     """)
     
     # Sidebar for inputs
@@ -366,12 +340,32 @@ def main():
                     st.metric("Plastic Slope", f"{results.get('S_Plastic', 0):.4f}")
             with col3:
                 if results.get("is_found"):
-                    st.metric("Auto Limit Pressure", f"{results['P_Limit']:.4f}")
+                    st.metric("Limit Pressure", f"{results['P_Limit']:.4f}")
+                    st.metric("Limit Displacement", f"{results['D_Limit']:.4f}")
                 else:
-                    st.metric("Auto Limit Pressure", "Not Found")
+                    st.metric("Limit Pressure", "Not Found")
+                    st.metric("Status", "❌")
             
-            # Plot results with FREE cursor movement
-            create_interactive_plot_with_free_cursor(displacements, pressures, results, method)
+            # Plot with TRUE FREE CURSOR movement
+            st.subheader("📊 Interactive Plot - Move Cursor Freely!")
+            st.markdown("""
+            **🖱️ How to use the free cursor:**
+            - **Simply move your mouse** over any line
+            - **See coordinates instantly** in the tooltip
+            - **No snapping** - cursor moves continuously
+            - **Hover over data points** (blue circles) for original values
+            - **Zoom and pan** as needed
+            """)
+            
+            try:
+                chart = create_free_cursor_chart(displacements, pressures, results, method)
+                st.altair_chart(chart, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error creating interactive chart: {e}")
+                st.info("Please make sure Altair is installed: `pip install altair`")
+            
+            if results.get("is_found"):
+                st.success(f"🎯 Auto Limit Load Found at P = {results['P_Limit']:.4f}, D = {results['D_Limit']:.4f}")
             
             # Detailed results
             st.subheader("🔍 Detailed Results")
@@ -389,11 +383,11 @@ def main():
                     st.write(f"- TES Slope: {results.get('S_TES', 0):.6f}")
                     st.write(f"- TES line equation: P = {results.get('S_TES', 0):.4f} × D")
                     if results.get("is_found"):
-                        st.success("✅ Auto limit load successfully determined")
-                        st.write(f"- Auto Limit Pressure: {results['P_Limit']:.6f}")
-                        st.write(f"- Auto Limit Displacement: {results['D_Limit']:.6f}")
+                        st.success("✅ Limit load successfully determined")
+                        st.write(f"- Limit Pressure: {results['P_Limit']:.6f}")
+                        st.write(f"- Limit Displacement: {results['D_Limit']:.6f}")
                     else:
-                        st.error("❌ Auto limit load not found with current parameters")
+                        st.error("❌ Limit load not found with current parameters")
                         
                 elif method == "TI":
                     st.write("**TI Method Results:**")
@@ -401,11 +395,11 @@ def main():
                     st.write(f"- Plastic Intercept: {results.get('C_Plastic', 0):.6f}")
                     st.write(f"- Plastic line equation: P = {results.get('S_Plastic', 0):.4f} × D + {results.get('C_Plastic', 0):.4f}")
                     if results.get("is_found"):
-                        st.success("✅ Auto limit load successfully determined")
-                        st.write(f"- Auto Limit Pressure: {results['P_Limit']:.6f}")
-                        st.write(f"- Auto Limit Displacement: {results['D_Limit']:.6f}")
+                        st.success("✅ Limit load successfully determined")
+                        st.write(f"- Limit Pressure: {results['P_Limit']:.6f}")
+                        st.write(f"- Limit Displacement: {results['D_Limit']:.6f}")
                     else:
-                        st.error("❌ Auto limit load not found with current parameters")
+                        st.error("❌ Limit load not found with current parameters")
             
             # Download results
             with st.expander("💾 Download Results"):
@@ -422,17 +416,17 @@ TES Line Equation: P = {results.get('S_TES', 0):.4f} × D
                 elif method == "TI":
                     results_text += f"""Plastic Slope: {results.get('S_Plastic', 0):.6f}
 Plastic Intercept: {results.get('C_Plastic', 0):.6f}
-Plastic Line Equation: P = {results.get('S_Plastic', 0):4f} × D + {results.get('C_Plastic', 0):.4f}
+Plastic Line Equation: P = {results.get('S_Plastic', 0):.4f} × D + {results.get('C_Plastic', 0):.4f}
 """
                 
                 if results.get("is_found"):
                     results_text += f"""
-AUTO LIMIT LOAD RESULTS:
+LIMIT LOAD RESULTS:
 Limit Pressure: {results['P_Limit']:.6f}
 Limit Displacement: {results['D_Limit']:.6f}
 """
                 else:
-                    results_text += "\nAuto limit load not found with current parameters."
+                    results_text += "\nLimit load not found with current parameters."
                 
                 st.download_button(
                     label="📥 Download Results as Text",
