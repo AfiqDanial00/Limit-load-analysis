@@ -129,8 +129,8 @@ def run_analysis(displacements, pressures, method, elastic_points, plastic_point
     
     return results
 
-def create_interactive_plot_with_cursor(displacements, pressures, results, method):
-    """Create visualization with manual cursor coordinate tracking"""
+def create_interactive_plot_with_free_cursor(displacements, pressures, results, method):
+    """Create visualization with manual coordinate exploration"""
     
     # Create comprehensive data frame with all series
     plot_data = []
@@ -146,7 +146,7 @@ def create_interactive_plot_with_cursor(displacements, pressures, results, metho
     
     # Generate points for elastic line
     D_max = max(displacements)
-    elastic_displacements = np.linspace(0, D_max, 50)
+    elastic_displacements = np.linspace(0, D_max, 100)
     elastic_pressures = results["S_Elastic"] * elastic_displacements
     
     elastic_df = pd.DataFrame({
@@ -184,29 +184,32 @@ def create_interactive_plot_with_cursor(displacements, pressures, results, metho
     # Combine all data
     combined_df = pd.concat(plot_data, ignore_index=True)
     
-    # --- MANUAL CURSOR COORDINATE TRACKING ---
+    # --- MANUAL COORDINATE EXPLORER ---
     st.markdown("---")
-    st.subheader("🎯 Manual Coordinate Explorer")
+    st.subheader("🎯 Free Coordinate Explorer")
+    st.info("**Move the slider to explore any point along the lines freely - NO AUTO-SNAP!**")
     
-    col1, col2, col3 = st.columns([1, 1, 1])
+    col1, col2, col3 = st.columns([1, 2, 1])
     
     with col1:
-        st.markdown("**Click on chart points to see coordinates**")
-        st.markdown("Or use the manual explorer below:")
-    
-    with col2:
         manual_d = st.slider(
-            "Manual Displacement",
+            "Displacement Position",
             min_value=float(0),
             max_value=float(max(displacements)),
             value=float(max(displacements) / 2),
-            step=0.01,
-            format="%.4f"
+            step=0.001,
+            format="%.4f",
+            key="manual_displacement"
         )
     
-    with col3:
+    with col2:
         # Calculate corresponding pressure values for manual displacement
         elastic_p = results["S_Elastic"] * manual_d
+        experimental_p = np.interp(manual_d, displacements, pressures)
+        
+        st.metric("Current Position", f"D = {manual_d:.4f}")
+        st.metric("Experimental Data Pressure", f"{experimental_p:.4f}")
+        st.metric("Elastic Line Pressure", f"{elastic_p:.4f}")
         
         if method == "TES":
             tes_p = 0.5 * results["S_Elastic"] * manual_d
@@ -214,39 +217,45 @@ def create_interactive_plot_with_cursor(displacements, pressures, results, metho
         elif method == "TI" and results.get("S_Plastic") is not None:
             plastic_p = results["S_Plastic"] * manual_d + results["C_Plastic"]
             st.metric("Plastic Line Pressure", f"{plastic_p:.4f}")
-        
-        st.metric("Elastic Line Pressure", f"{elastic_p:.4f}")
     
-    # Find closest experimental data point
-    exp_points = combined_df[combined_df['Series'] == 'Experimental Data']
-    closest_idx = np.argmin(np.abs(exp_points['Displacement'] - manual_d))
-    closest_point = exp_points.iloc[closest_idx]
+    with col3:
+        st.markdown("**Line Equations:**")
+        st.write(f"**Elastic:** P = {results['S_Elastic']:.4f} × D")
+        if method == "TES":
+            st.write(f"**TES:** P = {0.5 * results['S_Elastic']:.4f} × D")
+        elif method == "TI" and results.get("S_Plastic") is not None:
+            st.write(f"**Plastic:** P = {results['S_Plastic']:.4f} × D + {results['C_Plastic']:.4f}")
     
-    st.info(f"**Closest Experimental Point:** D = {closest_point['Displacement']:.4f}, P = {closest_point['Pressure']:.4f}")
-    
-    # Display all line equations
-    st.markdown("**📐 Line Equations:**")
-    equations_text = f"- **Experimental Data**: Points from input data\n"
-    equations_text += f"- **Elastic Slope**: P = {results['S_Elastic']:.4f} × D\n"
-    
-    if method == "TES":
-        equations_text += f"- **TES Line**: P = {0.5 * results['S_Elastic']:.4f} × D\n"
-    elif method == "TI" and results.get("S_Plastic") is not None:
-        equations_text += f"- **Plastic Tangent**: P = {results['S_Plastic']:.4f} × D + {results['C_Plastic']:.4f}\n"
-    
-    st.markdown(equations_text)
-    
-    # Create the main chart
+    # Create the main chart with the current manual position
     st.markdown("---")
     st.subheader("📊 Analysis Plot")
-    st.markdown("**Hover over points to see coordinates • Click and drag to zoom • Double-click to reset**")
     
+    # Add manual point to the data
+    manual_point_df = pd.DataFrame({
+        'Displacement': [manual_d],
+        'Pressure': [experimental_p],
+        'Series': ['Current Position'],
+        'Point_Type': ['Manual']
+    })
+    
+    all_data_df = pd.concat([combined_df, manual_point_df], ignore_index=True)
+    
+    # Create the main chart
     chart = st.line_chart(
-        combined_df[combined_df['Point_Type'].isin(['Line', 'Data'])], 
+        all_data_df[all_data_df['Point_Type'].isin(['Line', 'Data'])], 
         x='Displacement', 
         y='Pressure', 
         color='Series',
         height=500
+    )
+    
+    # Add manual point as a separate scatter plot
+    st.scatter_chart(
+        manual_point_df,
+        x='Displacement',
+        y='Pressure',
+        color='Series',
+        size=100
     )
     
     # Add limit point as a separate scatter plot if found
@@ -254,7 +263,7 @@ def create_interactive_plot_with_cursor(displacements, pressures, results, metho
         limit_points = pd.DataFrame({
             'Displacement': [results["D_Limit"]],
             'Pressure': [results["P_Limit"]],
-            'Series': ['Limit Load Point']
+            'Series': ['Auto Limit Load Point']
         })
         
         st.scatter_chart(
@@ -274,11 +283,11 @@ def main():
     
     # Instructions for new cursor functionality
     st.success("""
-    **🎯 NEW: Free Cursor Coordinate Tracking!**
-    - Use the **Manual Coordinate Explorer** below the plot
-    - **Slide the displacement slider** to see corresponding pressure values on all lines
-    - **See closest experimental data point** automatically
-    - **View all line equations** for manual calculations
+    **🎯 NEW: True Free Cursor Movement!**
+    - **No auto-snapping** to data points
+    - **Move the slider freely** to explore any coordinate
+    - **See exact values** on all lines simultaneously
+    - **Continuous exploration** - not limited to discrete points
     """)
     
     # Sidebar for inputs
@@ -361,8 +370,8 @@ def main():
                 else:
                     st.metric("Auto Limit Pressure", "Not Found")
             
-            # Plot results with enhanced interactivity
-            create_interactive_plot_with_cursor(displacements, pressures, results, method)
+            # Plot results with FREE cursor movement
+            create_interactive_plot_with_free_cursor(displacements, pressures, results, method)
             
             # Detailed results
             st.subheader("🔍 Detailed Results")
@@ -413,7 +422,7 @@ TES Line Equation: P = {results.get('S_TES', 0):.4f} × D
                 elif method == "TI":
                     results_text += f"""Plastic Slope: {results.get('S_Plastic', 0):.6f}
 Plastic Intercept: {results.get('C_Plastic', 0):.6f}
-Plastic Line Equation: P = {results.get('S_Plastic', 0):.4f} × D + {results.get('C_Plastic', 0):.4f}
+Plastic Line Equation: P = {results.get('S_Plastic', 0):4f} × D + {results.get('C_Plastic', 0):.4f}
 """
                 
                 if results.get("is_found"):
